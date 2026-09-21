@@ -1,0 +1,86 @@
+name: LR5 Vue Paper Dashboard CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Build Vue Paper Dashboard
+        env:
+          DEPLOY_TO_PAGES: 'true'
+        run: |
+          npm run build
+          test -s dist/index.html
+          test -d dist/js
+          test -d dist/css
+          printf '%s\n' "$GITHUB_SHA" > dist/deployment.txt
+
+      - name: Upload built site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Verify the published site
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -eu
+          site_url="${PAGE_URL%/}"
+          for attempt in $(seq 1 12); do
+            marker=$(curl -fsSL --max-time 10 "$site_url/deployment.txt" || true)
+            if [ "$marker" = "$GITHUB_SHA" ]; then
+              break
+            fi
+            sleep 5
+          done
+          test "$(curl -fsSL --max-time 10 "$site_url/deployment.txt")" = "$GITHUB_SHA"
+          curl -fsSL --max-time 10 "$site_url/" -o served-index.html
+          assets=$(grep -oE '/vpdl/(js|css)/[^" ]+' served-index.html | sort -u)
+          test -n "$assets"
+          printf '%s\n' "$assets" | while IFS= read -r asset; do
+            curl -fsSL --max-time 10 "$site_url/${asset#/vpdl/}" -o /dev/null
+          done
+
